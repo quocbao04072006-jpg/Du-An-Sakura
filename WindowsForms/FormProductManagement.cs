@@ -20,7 +20,7 @@ namespace MiniSupermarket.WinForms
         private Label lblPageInfo;
 
         private int currentPage = 1;
-        private const int pageSize = 5;
+        private const int pageSize = 10;
         private int totalPages = 1;
         private int totalItems = 0;
 
@@ -85,37 +85,37 @@ namespace MiniSupermarket.WinForms
             panelRight.BackColor = Color.White;
             panelRight.BorderStyle = BorderStyle.FixedSingle;
 
-            //// Mã vạch mới được hệ thống tạo tự động; giới hạn ô nhập 13 chữ số.
-            //txtBarcode.MaxLength = 13;
-            //txtBarcode.Location = new Point(140, 70);
-            //txtBarcode.Size = new Size(150, 30);
-            //lblBar.Text = "Barcode (13 số):";
-            //lblBar.Location = new Point(20, 73);
-            //lblBar.Size = new Size(115, 23);
+            // Barcode theo định dạng SAKURA + 5 chữ số.
+            txtBarcode.MaxLength = 11;
+            txtBarcode.Location = new Point(140, 70);
+            txtBarcode.Size = new Size(150, 30);
+            lblBar.Text = "Barcode:";
+            lblBar.Location = new Point(20, 73);
+            lblBar.Size = new Size(115, 23);
 
-            //btnGenerateBarcode = new Button
-            //{
-            //    Name = "btnGenerateBarcode",
-            //    Text = "Mã mới",
-            //    Location = new Point(298, 68),
-            //    Size = new Size(85, 32),
-            //    BackColor = Color.FromArgb(13, 148, 136),
-            //    ForeColor = Color.White,
-            //    FlatStyle = FlatStyle.Flat,
-            //    Cursor = Cursors.Hand,
-            //    Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            //    UseVisualStyleBackColor = false
-            //};
-            //btnGenerateBarcode.FlatAppearance.BorderSize = 0;
-            //panelRight.Controls.Add(btnGenerateBarcode);
-            //btnGenerateBarcode.BringToFront();
-            //btnGenerateBarcode.Click += async (s, e) =>
-            //{
-            //    if (isLoading) return;
-            //    ClearInputs();
-            //    await GenerateNextBarcodeAsync();
-            //    txtProductName.Focus();
-            //};
+            btnGenerateBarcode = new Button
+            {
+                Name = "btnGenerateBarcode",
+                Text = "Mã mới",
+                Location = new Point(298, 68),
+                Size = new Size(85, 32),
+                BackColor = Color.FromArgb(13, 148, 136),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                UseVisualStyleBackColor = false
+            };
+            btnGenerateBarcode.FlatAppearance.BorderSize = 0;
+            panelRight.Controls.Add(btnGenerateBarcode);
+            btnGenerateBarcode.BringToFront();
+            btnGenerateBarcode.Click += async (s, e) =>
+            {
+                if (isLoading) return;
+                ClearInputs();
+                await GenerateNextBarcodeAsync();
+                txtProductName.Focus();
+            };
 
             Label lblTitle = new Label
             {
@@ -205,6 +205,12 @@ namespace MiniSupermarket.WinForms
                 Cursor = Cursors.Hand,
                 Enabled = false
             };
+
+            // Neo các thành phần phân trang xuống đáy form để không đè lên bảng
+            // khi cửa sổ được phóng to hoặc thay đổi kích thước.
+            btnPrevious.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            lblPageInfo.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            btnNext.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
 
             Controls.Add(lblTitle);
             Controls.Add(lblSubtitle);
@@ -353,9 +359,6 @@ namespace MiniSupermarket.WinForms
                 cboCategory.ValueMember = "CategoryId";
                 cboCategory.DataSource = categories;
 
-                cboFilterCategory.SelectedIndexChanged -=
-                    CboFilterCategory_SelectedIndexChanged;
-
                 cboFilterCategory.Items.Clear();
 
                 cboFilterCategory.Items.Add(new CategoryFilterItem
@@ -378,8 +381,6 @@ namespace MiniSupermarket.WinForms
                 if (cboFilterCategory.Items.Count > 0)
                     cboFilterCategory.SelectedIndex = 0;
 
-                cboFilterCategory.SelectedIndexChanged +=
-                    CboFilterCategory_SelectedIndexChanged;
             }
             catch (Exception ex)
             {
@@ -393,15 +394,6 @@ namespace MiniSupermarket.WinForms
             {
                 isLoading = false;
             }
-        }
-
-        private async void CboFilterCategory_SelectedIndexChanged(
-            object sender, EventArgs e)
-        {
-            if (!IsHandleCreated || isLoading) return;
-
-            currentPage = 1;
-            await LoadProductsAsync();
         }
 
         // =====================================================
@@ -460,6 +452,10 @@ namespace MiniSupermarket.WinForms
                 SetColumnHeader("StockQuantity", "Tồn kho");
                 SetColumnHeader("CategoryId", "Mã danh mục");
                 SetColumnHeader("CategoryName", "Danh mục");
+
+                // Cố định thứ tự và độ rộng các cột để Barcode không bị
+                // co quá nhỏ hoặc hiển thị lệch khi bảng tự co giãn.
+                ConfigureProductGridColumns();
             }
             catch (HttpRequestException ex)
             {
@@ -482,6 +478,57 @@ namespace MiniSupermarket.WinForms
                 isLoading = false;
                 UpdatePagingControls();
             }
+        }
+
+
+
+        private void ConfigureProductGridColumns()
+        {
+            if (dgvProducts.Columns.Count == 0)
+                return;
+
+            // Dữ liệu lấy từ ProductListItemDto nên dùng đúng tên thuộc tính.
+            dgvProducts.AutoGenerateColumns = true;
+            dgvProducts.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+            dgvProducts.ScrollBars = ScrollBars.Both;
+
+            SetGridColumn("ProductId", "Mã SP", 60, 0);
+            SetGridColumn("Barcode", "Mã vạch", 125, 1);
+            SetGridColumn("ProductName", "Tên sản phẩm", 150, 2);
+            SetGridColumn("Price", "Đơn giá", 100, 3);
+            SetGridColumn("StockQuantity", "Tồn kho", 75, 4);
+            SetGridColumn("CategoryId", "Mã danh mục", 90, 5);
+            SetGridColumn("CategoryName", "Danh mục", 120, 6);
+
+            if (dgvProducts.Columns.Contains("Price"))
+            {
+                dgvProducts.Columns["Price"].DefaultCellStyle.Format = "N0";
+                dgvProducts.Columns["Price"].DefaultCellStyle.Alignment =
+                    DataGridViewContentAlignment.MiddleRight;
+            }
+
+            if (dgvProducts.Columns.Contains("Barcode"))
+            {
+                dgvProducts.Columns["Barcode"].DefaultCellStyle.Alignment =
+                    DataGridViewContentAlignment.MiddleLeft;
+                dgvProducts.Columns["Barcode"].DefaultCellStyle.WrapMode =
+                    DataGridViewTriState.False;
+            }
+        }
+
+        private void SetGridColumn(
+            string columnName, string headerText, int width, int displayIndex)
+        {
+            if (!dgvProducts.Columns.Contains(columnName))
+                return;
+
+            DataGridViewColumn column = dgvProducts.Columns[columnName];
+            column.HeaderText = headerText;
+            column.Width = width;
+            column.MinimumWidth = Math.Min(width, 55);
+            column.DisplayIndex = displayIndex;
+            column.Visible = true;
+            column.SortMode = DataGridViewColumnSortMode.Automatic;
         }
 
         private void SetColumnHeader(string columnName, string headerText)
@@ -589,6 +636,28 @@ namespace MiniSupermarket.WinForms
                 return false;
             }
 
+            if (nudPrice.Value <= 0)
+            {
+                MessageBox.Show("Đơn giá phải lớn hơn 0.");
+                nudPrice.Focus();
+                return false;
+            }
+
+            if (nudStock.Value < 0)
+            {
+                MessageBox.Show("Số lượng tồn kho không được âm.");
+                nudStock.Focus();
+                return false;
+            }
+
+            if (!IsValidBarcodeFormat(txtBarcode.Text.Trim()))
+            {
+                MessageBox.Show("Mã vạch phải có dạng SAKURA + 5 chữ số, ví dụ SAKURA10010.");
+                txtBarcode.Focus();
+                txtBarcode.SelectAll();
+                return false;
+            }
+
             if (cboCategory.SelectedValue == null ||
                 !int.TryParse(
                     cboCategory.SelectedValue.ToString(),
@@ -623,7 +692,7 @@ namespace MiniSupermarket.WinForms
         }
 
         // =====================================================
-        // 8. TẠO MÃ VẠCH 13 CHỮ SỐ
+        // 8. TẠO MÃ VẠCH SAKURA + 5 CHỮ SỐ
         // =====================================================
 
         private async Task GenerateNextBarcodeAsync()
@@ -654,12 +723,11 @@ namespace MiniSupermarket.WinForms
 
                     string barcode = generated == null ? null : generated.Barcode;
 
-                    if (!IsThirteenDigitBarcode(barcode) ||
-                        !barcode.StartsWith("893", StringComparison.Ordinal))
+                    if (!IsValidBarcodeFormat(barcode))
                     {
                         txtBarcode.Clear();
                         MessageBox.Show(
-                            "API trả về mã vạch không hợp lệ. Mã phải gồm đúng 13 chữ số và bắt đầu bằng 893.",
+                            "API trả về mã vạch không hợp lệ. Mã phải có dạng SAKURA + 5 chữ số (ví dụ: SAKURA10010).",
                             "Mã vạch không hợp lệ",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Warning);
@@ -681,11 +749,12 @@ namespace MiniSupermarket.WinForms
             }
         }
 
-        private static bool IsThirteenDigitBarcode(string barcode)
+        private static bool IsValidBarcodeFormat(string barcode)
         {
             return !string.IsNullOrWhiteSpace(barcode) &&
-                barcode.Length == 13 &&
-                System.Text.RegularExpressions.Regex.IsMatch(barcode, @"^\d{13}$");
+                System.Text.RegularExpressions.Regex.IsMatch(
+                    barcode, @"^SAKURA\d{5}$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         }
 
         private sealed class BarcodeGenerationResponse
@@ -742,12 +811,11 @@ namespace MiniSupermarket.WinForms
             if (!ValidateProductInput())
                 return;
 
-            string candidateBarcode = txtBarcode.Text.Trim();
-            if (!IsThirteenDigitBarcode(candidateBarcode) ||
-                !candidateBarcode.StartsWith("893", StringComparison.Ordinal))
+            string candidateBarcode = txtBarcode.Text.Trim().ToUpperInvariant();
+            if (!IsValidBarcodeFormat(candidateBarcode))
             {
                 MessageBox.Show(
-                    "Mã vạch sản phẩm mới phải gồm 13 chữ số và bắt đầu bằng 893. Bấm 'Mã mới' để hệ thống tạo mã.",
+                    "Mã vạch phải có dạng SAKURA + 5 chữ số (ví dụ: SAKURA10010). Bấm 'Mã mới' để hệ thống tạo mã.",
                     "Mã vạch không hợp lệ",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
@@ -767,7 +835,7 @@ namespace MiniSupermarket.WinForms
 
                 ApiClientService.SetAuthenticationToken();
 
-                string barcode = txtBarcode.Text.Trim();
+                string barcode = txtBarcode.Text.Trim().ToUpperInvariant();
 
                 // Kiểm tra mã vạch trước khi gửi yêu cầu thêm.
                 if (await IsBarcodeDuplicateAsync(barcode))
@@ -871,7 +939,7 @@ namespace MiniSupermarket.WinForms
 
                 ApiClientService.SetAuthenticationToken();
 
-                string barcode = txtBarcode.Text.Trim();
+                string barcode = txtBarcode.Text.Trim().ToUpperInvariant();
 
                 // Cho phép giữ nguyên mã vạch của chính sản phẩm đang sửa.
                 if (await IsBarcodeDuplicateForOtherProductAsync(barcode, id))

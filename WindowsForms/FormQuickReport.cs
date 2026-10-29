@@ -1,11 +1,15 @@
+using System.Windows.Forms.DataVisualization.Charting;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Threading.Tasks;
+using System.Text;
 using System.Windows.Forms;
 
 namespace MiniSupermarket.WinForms
@@ -36,8 +40,14 @@ namespace MiniSupermarket.WinForms
         };
 
         private List<HourlyRevenueDto> hourlyRevenue = new List<HourlyRevenueDto>();
+        private List<DailyRevenueDto> dailyRevenue = new List<DailyRevenueDto>();
         private List<CategoryRevenueDto> revenueByCategory = new List<CategoryRevenueDto>();
+        private ReportAnalyticsDto lastReport;
+        private DateTime lastReportFrom;
+        private DateTime lastReportTo;
+        private Button btnExportCsv = new Button();
         private bool changingPeriod;
+        private bool showDailyRevenueChart = true;
 
         public FormQuickReport()
         {
@@ -64,6 +74,20 @@ namespace MiniSupermarket.WinForms
             MinimumSize = new Size(1000, 680);
 
             StyleButton(btnRunReport, blue);
+            lblHourlyTitle.Text = "DOANH THU THEO NGÀY / TUẦN / THÁNG";
+
+            // Nut xuat CSV duoc tao bang code, khong can sua file Designer.
+            btnExportCsv.Name = "btnExportCsv";
+            btnExportCsv.Text = "Xuất CSV";
+            btnExportCsv.Size = new Size(120, 36);
+            btnExportCsv.Location = new Point(
+                Math.Max(0, headerPanel.ClientSize.Width - 132), 8);
+            btnExportCsv.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnExportCsv.Enabled = false;
+            StyleButton(btnExportCsv, teal);
+            btnExportCsv.Click += btnExportCsv_Click;
+            headerPanel.Controls.Add(btnExportCsv);
+
             cboPeriod.DropDownStyle = ComboBoxStyle.DropDownList;
             if (cboPeriod.Items.Count == 0)
                 cboPeriod.Items.AddRange(new object[] { "Hôm nay", "Tuần này", "Tháng này", "Tùy chỉnh" });
@@ -190,8 +214,8 @@ namespace MiniSupermarket.WinForms
             }
 
             btnRunReport.Enabled = false;
-            Cursor previousCursor = Cursor;
-            Cursor = Cursors.WaitCursor;
+            System.Windows.Forms.Cursor previousCursor = this.Cursor;
+            this.Cursor = System.Windows.Forms.Cursors.WaitCursor;
             lblReportStatus.Text = "Đang tải dữ liệu báo cáo...";
             SetSummaryPlaceholders();
 
@@ -208,8 +232,45 @@ namespace MiniSupermarket.WinForms
                 if (result == null)
                     throw new InvalidOperationException("API không trả dữ liệu báo cáo.");
 
+                lastReport = result;
+                lastReportFrom = from;
+                lastReportTo = to;
+                btnExportCsv.Enabled = true;
+
                 hourlyRevenue = result.RevenueByHour ?? new List<HourlyRevenueDto>();
+                dailyRevenue = result.RevenueByDay ?? new List<DailyRevenueDto>();
                 revenueByCategory = result.RevenueByCategory ?? new List<CategoryRevenueDto>();
+
+                // Chọn một ngày thì xem doanh thu theo giờ; nhiều ngày thì xem theo ngày.
+                showDailyRevenueChart = from.Date != to.Date;
+                lblHourlyTitle.Text = showDailyRevenueChart
+                    ? "DOANH THU THEO NGÀY / TUẦN / THÁNG"
+                    : "DOANH THU THEO GIỜ";
+
+                // Ưu tiên dữ liệu do ADO.NET gọi Stored Procedure trả về.
+                // Nếu SP chưa tồn tại/không khả dụng, dùng dữ liệu theo ngày của analytics làm dự phòng.
+                bool usedStoredProcedure = false;
+                try
+                {
+                    string dailyUrl = "reports/revenue-by-day?from="
+                        + from.ToString("yyyy-MM-dd")
+                        + "&to=" + to.ToString("yyyy-MM-dd");
+
+                    List<DailyRevenueDto> storedProcedureRows =
+                        await ApiClientService.Client
+                            .GetFromJsonAsync<List<DailyRevenueDto>>(dailyUrl);
+
+                    if (storedProcedureRows != null && storedProcedureRows.Count > 0)
+                    {
+                        dailyRevenue = storedProcedureRows;
+                        usedStoredProcedure = true;
+                    }
+                }
+                catch (Exception)
+                {
+                    // Không làm trắng biểu đồ nếu endpoint Stored Procedure chưa sẵn sàng.
+                    // Dữ liệu dự phòng đã lấy từ reports/analytics ở phía trên.
+                }
 
                 bool currentMonth = from == new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1)
                     && to == DateTime.Today;
@@ -224,6 +285,7 @@ namespace MiniSupermarket.WinForms
                 categoryChartPanel.Invalidate();
                 lblReportStatus.Text = "Đã đồng bộ dữ liệu từ "
                     + from.ToString("dd/MM/yyyy") + " đến " + to.ToString("dd/MM/yyyy")
+                    + (usedStoredProcedure ? " · ADO.NET/Stored Procedure" : " · dữ liệu dự phòng EF Core")
                     + " · " + DateTime.Now.ToString("HH:mm:ss");
             }
             catch (HttpRequestException ex)
@@ -240,9 +302,137 @@ namespace MiniSupermarket.WinForms
             }
             finally
             {
-                Cursor = previousCursor;
+                this.Cursor = previousCursor;
                 btnRunReport.Enabled = true;
             }
+        }
+
+        private void btnExportCsv_Click(object sender, EventArgs e)
+        {
+            if (lastReport == null)
+            {
+                MessageBox.Show(
+                    "Chưa có dữ liệu báo cáo để xuất. Vui lòng tải báo cáo trước.",
+                    "Chưa có dữ liệu",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = "Xuất báo cáo doanh thu CSV";
+                dialog.Filter = "Tệp CSV UTF-8 (*.csv)|*.csv";
+                dialog.DefaultExt = "csv";
+                dialog.AddExtension = true;
+                dialog.OverwritePrompt = true;
+                dialog.FileName = "BaoCaoSakura_"
+                    + lastReportFrom.ToString("yyyyMMdd") + "_"
+                    + lastReportTo.ToString("yyyyMMdd") + ".csv";
+
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                    return;
+
+                try
+                {
+                    List<string> lines = new List<string>();
+
+                    lines.Add(CsvRow("BÁO CÁO DOANH THU SAKURA"));
+                    lines.Add(CsvRow(
+                        "Từ ngày",
+                        lastReportFrom.ToString("dd/MM/yyyy"),
+                        "Đến ngày",
+                        lastReportTo.ToString("dd/MM/yyyy")));
+                    lines.Add(CsvRow("Thời điểm xuất", DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss")));
+                    lines.Add(string.Empty);
+
+                    lines.Add(CsvRow("TỔNG QUAN"));
+                    lines.Add(CsvRow("Chỉ số", "Giá trị"));
+                    lines.Add(CsvRow("Tổng doanh thu (VND)", lastReport.TotalRevenue.ToString("0.##", CultureInfo.InvariantCulture)));
+                    lines.Add(CsvRow("Tổng số hóa đơn", lastReport.TotalOrders.ToString(CultureInfo.InvariantCulture)));
+                    lines.Add(CsvRow("Giá trị hóa đơn trung bình (VND)", lastReport.AverageOrderValue.ToString("0.##", CultureInfo.InvariantCulture)));
+                    lines.Add(string.Empty);
+
+                    lines.Add(CsvRow("DOANH THU THEO NGÀY"));
+                    lines.Add(CsvRow("Ngày", "Doanh thu (VND)"));
+                    foreach (DailyRevenueDto row in dailyRevenue.OrderBy(x => x.Date))
+                    {
+                        lines.Add(CsvRow(
+                            row.Date.ToString("dd/MM/yyyy"),
+                            row.Revenue.ToString("0.##", CultureInfo.InvariantCulture)));
+                    }
+                    lines.Add(string.Empty);
+
+                    lines.Add(CsvRow("DOANH THU THEO GIỜ"));
+                    lines.Add(CsvRow("Giờ", "Doanh thu (VND)"));
+                    foreach (HourlyRevenueDto row in (lastReport.RevenueByHour ?? new List<HourlyRevenueDto>()).OrderBy(x => x.Hour))
+                    {
+                        lines.Add(CsvRow(
+                            row.Hour.ToString("00", CultureInfo.InvariantCulture) + ":00",
+                            row.Revenue.ToString("0.##", CultureInfo.InvariantCulture)));
+                    }
+                    lines.Add(string.Empty);
+
+                    lines.Add(CsvRow("DOANH THU THEO NGÀNH HÀNG"));
+                    lines.Add(CsvRow("Tên ngành hàng", "Số lượng bán", "Doanh thu (VND)"));
+                    foreach (CategoryRevenueDto row in (lastReport.RevenueByCategory ?? new List<CategoryRevenueDto>()).OrderByDescending(x => x.Revenue))
+                    {
+                        lines.Add(CsvRow(
+                            row.CategoryName ?? "Chưa phân loại",
+                            row.Quantity.ToString(CultureInfo.InvariantCulture),
+                            row.Revenue.ToString("0.##", CultureInfo.InvariantCulture)));
+                    }
+                    lines.Add(string.Empty);
+
+                    lines.Add(CsvRow("TOP SẢN PHẨM BÁN CHẠY"));
+                    lines.Add(CsvRow("Hạng", "Mã sản phẩm", "Barcode", "Tên sản phẩm", "Đơn vị", "Số lượng", "Doanh thu (VND)"));
+                    foreach (TopProductDto row in (lastReport.TopProducts ?? new List<TopProductDto>()).OrderBy(x => x.Rank))
+                    {
+                        lines.Add(CsvRow(
+                            row.Rank.ToString(CultureInfo.InvariantCulture),
+                            row.ProductId.ToString(CultureInfo.InvariantCulture),
+                            row.Barcode ?? string.Empty,
+                            row.ProductName ?? string.Empty,
+                            row.Unit ?? "SP",
+                            row.Quantity.ToString(CultureInfo.InvariantCulture),
+                            row.Revenue.ToString("0.##", CultureInfo.InvariantCulture)));
+                    }
+
+                    // BOM UTF-8 giup Excel hien thi dung tieng Viet.
+                    File.WriteAllText(
+                        dialog.FileName,
+                        string.Join(Environment.NewLine, lines),
+                        new UTF8Encoding(true));
+
+                    lblReportStatus.Text = "Đã xuất báo cáo CSV: " + Path.GetFileName(dialog.FileName);
+                    MessageBox.Show(
+                        "Xuất báo cáo CSV thành công.",
+                        "Hoàn tất",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        "Không thể xuất báo cáo CSV.\n" + ex.Message,
+                        "Lỗi xuất báo cáo",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private static string CsvRow(params string[] values)
+        {
+            return string.Join(",", values.Select(CsvEscape));
+        }
+
+        private static string CsvEscape(string value)
+        {
+            if (value == null)
+                value = string.Empty;
+
+            return "\"" + value.Replace("\"", "\"\"") + "\"";
         }
 
         private void BindTopProducts(List<TopProductDto> items)
@@ -287,18 +477,137 @@ namespace MiniSupermarket.WinForms
 
         private void HourlyChartPanel_Paint(object sender, PaintEventArgs e)
         {
+            // Tái sử dụng vùng biểu đồ hiện có để vẽ doanh thu theo từng ngày.
+            // Dữ liệu được lấy từ reports/revenue-by-day (Stored Procedure),
+            // hoặc từ reports/analytics nếu endpoint trên chưa sẵn sàng.
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Color.White);
 
-            Rectangle area = new Rectangle(48, 16, Math.Max(10, hourlyChartPanel.ClientSize.Width - 64),
-                Math.Max(10, hourlyChartPanel.ClientSize.Height - 52));
+            // Giữ biểu đồ theo giờ cho báo cáo đúng một ngày.
+            if (!showDailyRevenueChart)
+            {
+                DrawHourlyRevenueChart(g);
+                return;
+            }
 
-            decimal maxRevenue = hourlyRevenue.Count == 0 ? 0m : hourlyRevenue.Max(x => x.Revenue);
-            if (maxRevenue <= 0m) maxRevenue = 1m;
+            Rectangle area = new Rectangle(
+                48,
+                12,
+                Math.Max(10, hourlyChartPanel.ClientSize.Width - 62),
+                Math.Max(10, hourlyChartPanel.ClientSize.Height - 42));
+
+            List<DailyRevenueDto> points = dailyRevenue
+                .OrderBy(x => x.Date)
+                .ToList();
+
+            decimal maxRevenue = points.Count == 0
+                ? 0m
+                : points.Max(x => x.Revenue);
+            if (maxRevenue <= 0m)
+                maxRevenue = 1m;
 
             using (Font axisFont = new Font("Segoe UI", 7F))
-            using (Font smallFont = new Font("Segoe UI", 7.5F, FontStyle.Bold))
+            using (Font smallFont = new Font("Segoe UI", 8F, FontStyle.Bold))
+            using (Pen gridPen = new Pen(Color.FromArgb(226, 232, 240)))
+            using (Brush axisBrush = new SolidBrush(muted))
+            using (Brush barBrush = new SolidBrush(blue))
+            using (Brush emptyBrush = new SolidBrush(muted))
+            using (StringFormat centered = new StringFormat())
+            {
+                centered.Alignment = StringAlignment.Center;
+                centered.LineAlignment = StringAlignment.Center;
+
+                for (int i = 0; i <= 4; i++)
+                {
+                    float y = area.Top + area.Height * i / 4f;
+                    g.DrawLine(gridPen, area.Left, y, area.Right, y);
+
+                    decimal value = maxRevenue * (4 - i) / 4m;
+                    g.DrawString(
+                        FormatCompactMoney(value),
+                        axisFont,
+                        axisBrush,
+                        new RectangleF(0, y - 7, 43, 14),
+                        centered);
+                }
+
+                if (points.Count > 0)
+                {
+                    float slot = area.Width / (float)points.Count;
+                    float barWidth = Math.Max(1f, Math.Min(22f, slot * 0.68f));
+                    int labelStep = Math.Max(1, (int)Math.Ceiling(points.Count / 14.0));
+
+                    for (int i = 0; i < points.Count; i++)
+                    {
+                        DailyRevenueDto point = points[i];
+                        float height = (float)(point.Revenue / maxRevenue) * area.Height;
+                        float x = area.Left + i * slot + (slot - barWidth) / 2f;
+                        float y = area.Bottom - height;
+
+                        if (point.Revenue > 0m)
+                        {
+                            g.FillRectangle(
+                                barBrush,
+                                x,
+                                y,
+                                barWidth,
+                                Math.Max(1f, height));
+                        }
+
+                        // Khoảng ngày dài thì tự giãn nhãn để các mốc không chồng lên nhau.
+                        if (i % labelStep == 0 || i == points.Count - 1)
+                        {
+                            float labelWidth = Math.Max(30f, Math.Min(54f, slot * labelStep));
+                            float labelCenter = area.Left + i * slot + slot / 2f;
+                            RectangleF labelRect = new RectangleF(
+                                labelCenter - labelWidth / 2f,
+                                area.Bottom + 4,
+                                labelWidth,
+                                22);
+
+                            g.DrawString(
+                                point.Date.ToString("dd/MM"),
+                                axisFont,
+                                axisBrush,
+                                labelRect,
+                                centered);
+                        }
+                    }
+                }
+
+                if (points.Count == 0 || points.All(x => x.Revenue <= 0m))
+                {
+                    g.DrawString(
+                        "Chưa có doanh thu trong khoảng thời gian này.",
+                        smallFont,
+                        emptyBrush,
+                        new RectangleF(
+                            area.Left + 8,
+                            area.Top + area.Height / 2f - 10,
+                            Math.Max(10, area.Width - 16),
+                            24),
+                        centered);
+                }
+            }
+        }
+
+        private void DrawHourlyRevenueChart(Graphics g)
+        {
+            Rectangle area = new Rectangle(
+                48,
+                12,
+                Math.Max(10, hourlyChartPanel.ClientSize.Width - 62),
+                Math.Max(10, hourlyChartPanel.ClientSize.Height - 42));
+
+            decimal maxRevenue = hourlyRevenue.Count == 0
+                ? 0m
+                : hourlyRevenue.Max(x => x.Revenue);
+            if (maxRevenue <= 0m)
+                maxRevenue = 1m;
+
+            using (Font axisFont = new Font("Segoe UI", 7F))
+            using (Font smallFont = new Font("Segoe UI", 8F, FontStyle.Bold))
             using (Pen gridPen = new Pen(Color.FromArgb(226, 232, 240)))
             using (Brush axisBrush = new SolidBrush(muted))
             using (Brush barBrush = new SolidBrush(blue))
@@ -320,7 +629,8 @@ namespace MiniSupermarket.WinForms
                 List<HourlyRevenueDto> points = Enumerable.Range(0, 24)
                     .Select(hour => hourlyRevenue.FirstOrDefault(x => x.Hour == hour)
                         ?? new HourlyRevenueDto { Hour = hour, Revenue = 0m })
-                    .OrderBy(x => x.Hour).ToList();
+                    .OrderBy(x => x.Hour)
+                    .ToList();
 
                 float slot = area.Width / 24f;
                 float barWidth = Math.Max(2f, slot * 0.66f);
@@ -338,13 +648,13 @@ namespace MiniSupermarket.WinForms
                     {
                         g.DrawString(point.Hour.ToString("00") + ":00", axisFont, axisBrush,
                             new RectangleF(area.Left + point.Hour * slot - slot * 0.35f,
-                                area.Bottom + 5, slot * 1.7f, 22), centered);
+                                area.Bottom + 4, slot * 1.7f, 22), centered);
                     }
                 }
 
                 if (hourlyRevenue.Count == 0 || hourlyRevenue.All(x => x.Revenue <= 0m))
                 {
-                    g.DrawString("Chưa có dữ liệu doanh thu trong khoảng thời gian này.",
+                    g.DrawString("Chưa có dữ liệu doanh thu theo giờ trong ngày này.",
                         smallFont, emptyBrush,
                         new RectangleF(area.Left + 8, area.Top + area.Height / 2f - 10,
                             Math.Max(10, area.Width - 16), 24), centered);
@@ -470,6 +780,7 @@ namespace MiniSupermarket.WinForms
         public int TotalOrders { get; set; }
         public decimal AverageOrderValue { get; set; }
         public List<HourlyRevenueDto> RevenueByHour { get; set; } = new List<HourlyRevenueDto>();
+        public List<DailyRevenueDto> RevenueByDay { get; set; } = new List<DailyRevenueDto>();
         public List<CategoryRevenueDto> RevenueByCategory { get; set; } = new List<CategoryRevenueDto>();
         public List<TopProductDto> TopProducts { get; set; } = new List<TopProductDto>();
     }
@@ -478,6 +789,13 @@ namespace MiniSupermarket.WinForms
     {
         public int Hour { get; set; }
         public decimal Revenue { get; set; }
+    }
+
+    public class DailyRevenueDto
+    {
+        public DateTime Date { get; set; }
+        public decimal Revenue { get; set; }
+        public long OrderCount { get; set; }
     }
 
     public class CategoryRevenueDto
