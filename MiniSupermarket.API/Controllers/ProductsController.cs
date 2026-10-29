@@ -1,7 +1,15 @@
+
+using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+
 using MiniSupermarket.API.Data;
 using MiniSupermarket.API.Models;
 
@@ -20,37 +28,31 @@ namespace MiniSupermarket.API.Controllers
         }
 
         // GET: api/products
-        // Giữ endpoint cũ để các màn hình hiện tại như POS vẫn hoạt động.
+        // Moi tai khoan da dang nhap deu co the xem san pham.
         [HttpGet]
         public async Task<ActionResult<IEnumerable<Product>>> GetProducts()
         {
-            return await _context.Products
+            var products = await _context.Products
                 .AsNoTracking()
                 .Include(p => p.Category)
+                .OrderBy(p => p.ProductId)
                 .ToListAsync();
+
+            return Ok(products);
         }
 
         // GET: api/products/paged?keyword=senka&pageNumber=1&pageSize=5&categoryId=1
-        // Phân trang tại SQL Server, tìm theo tên/mã vạch và lọc theo danh mục.
         [HttpGet("paged")]
-        public async Task<ActionResult<PagedResultDto<ProductListItemDto>>> GetPagedProducts(
-            [FromQuery] string keyword = "",
-            [FromQuery] int pageNumber = 1,
-            [FromQuery] int pageSize = 5,
-            [FromQuery] int? categoryId = null)
+        public async Task<ActionResult<PagedResultDto<ProductListItemDto>>>
+            GetPagedProducts(
+                [FromQuery] string keyword = "",
+                [FromQuery] int pageNumber = 1,
+                [FromQuery] int pageSize = 5,
+                [FromQuery] int? categoryId = null)
         {
-            if (pageNumber < 1)
-            {
-                pageNumber = 1;
-            }
+            pageNumber = Math.Max(1, pageNumber);
+            pageSize = Math.Clamp(pageSize, 1, 50);
 
-            // Chỉ cho phép kích thước trang từ 1 đến 50 để tránh tải quá nhiều dữ liệu.
-            if (pageSize < 1 || pageSize > 50)
-            {
-                pageSize = 5;
-            }
-
-            // Eager Loading lấy kèm tên danh mục; AsNoTracking tối ưu truy vấn chỉ đọc.
             IQueryable<Product> query = _context.Products
                 .Include(p => p.Category)
                 .AsNoTracking();
@@ -58,6 +60,7 @@ namespace MiniSupermarket.API.Controllers
             if (!string.IsNullOrWhiteSpace(keyword))
             {
                 string search = keyword.Trim();
+
                 query = query.Where(p =>
                     p.ProductName.Contains(search) ||
                     p.Barcode.Contains(search));
@@ -65,33 +68,26 @@ namespace MiniSupermarket.API.Controllers
 
             if (categoryId.HasValue && categoryId.Value > 0)
             {
-                query = query.Where(p => p.CategoryId == categoryId.Value);
+                query = query.Where(
+                    p => p.CategoryId == categoryId.Value);
             }
 
-            // Đếm tổng số bản ghi sau khi áp dụng điều kiện tìm kiếm/lọc.
             int totalItems = await query.CountAsync();
-            int totalPages = (int)Math.Ceiling(totalItems / (double)pageSize);
 
-            // Nếu xóa bản ghi ở trang cuối, tự điều chỉnh về trang cuối còn tồn tại.
-            if (totalPages > 0 && pageNumber > totalPages)
-            {
-                pageNumber = totalPages;
-            }
+            int totalPages = (int)Math.Ceiling(
+                totalItems / (double)pageSize);
 
-            if (totalPages == 0)
-            {
-                pageNumber = 1;
-            }
+            pageNumber = totalPages == 0
+                ? 1
+                : Math.Min(pageNumber, totalPages);
 
-            // Skip/Take được EF Core chuyển thành phân trang ở SQL Server.
             List<Product> products = await query
                 .OrderBy(p => p.ProductId)
                 .Skip((pageNumber - 1) * pageSize)
                 .Take(pageSize)
                 .ToListAsync();
 
-            // Chuyển Entity sang DTO trước khi trả JSON.
-            List<ProductListItemDto> items = products.Select(p => new ProductListItemDto
+            var items = products.Select(p => new ProductListItemDto
             {
                 ProductId = p.ProductId,
                 Barcode = p.Barcode,
@@ -99,19 +95,19 @@ namespace MiniSupermarket.API.Controllers
                 Price = p.Price,
                 StockQuantity = p.StockQuantity,
                 CategoryId = p.CategoryId,
-                CategoryName = p.Category != null ? p.Category.CategoryName : string.Empty
+                CategoryName = p.Category != null
+                    ? p.Category.CategoryName
+                    : string.Empty
             }).ToList();
 
-            var result = new PagedResultDto<ProductListItemDto>
+            return Ok(new PagedResultDto<ProductListItemDto>
             {
                 CurrentPage = pageNumber,
                 PageSize = pageSize,
                 TotalItems = totalItems,
                 TotalPages = totalPages,
                 Items = items
-            };
-
-            return Ok(result);
+            });
         }
 
         // GET: api/products/5
@@ -123,150 +119,331 @@ namespace MiniSupermarket.API.Controllers
                 .Include(p => p.Category)
                 .FirstOrDefaultAsync(p => p.ProductId == id);
 
-            return product == null ? NotFound() : Ok(product);
+            if (product == null)
+            {
+                return NotFound(new
+                {
+                    message = "Không tìm thấy sản phẩm."
+                });
+            }
+
+            return Ok(product);
         }
 
-        // GET: api/products/barcode/123456
+        // GET: api/products/barcode/SAKURA10010
         [HttpGet("barcode/{barcode}")]
-        public async Task<ActionResult<Product>> GetByBarcode(string barcode)
+        public async Task<ActionResult<ProductListItemDto>> GetByBarcode(
+            string barcode)
         {
+            if (string.IsNullOrWhiteSpace(barcode))
+            {
+                return BadRequest(new
+                {
+                    message = "Mã vạch không được để trống."
+                });
+            }
+
+            string normalized = barcode.Trim().ToUpperInvariant();
+
             var product = await _context.Products
                 .AsNoTracking()
                 .Include(p => p.Category)
-                .FirstOrDefaultAsync(p => p.Barcode == barcode);
+                .FirstOrDefaultAsync(
+                    p => p.Barcode.ToUpper() == normalized);
 
-            return product == null ? NotFound() : Ok(product);
+            if (product == null)
+            {
+                return NotFound(new
+                {
+                    message = "Không tìm thấy mã vạch."
+                });
+            }
+
+            return Ok(new ProductListItemDto
+            {
+                ProductId = product.ProductId,
+                Barcode = product.Barcode,
+                ProductName = product.ProductName,
+                Price = product.Price,
+                StockQuantity = product.StockQuantity,
+                CategoryId = product.CategoryId,
+                CategoryName = product.Category?.CategoryName
+                    ?? string.Empty
+            });
         }
 
         // GET: api/products/next-barcode
-        // Sinh mã vạch 13 chữ số bắt đầu bằng 893. Mã mẫu đầu tiên theo yêu cầu là
-        // 8934567890128; những mã đang có sẽ được kiểm tra để không tạo trùng.
+        // Chi Admin va Warehouse can ma vach moi de them san pham.
+        [Authorize(Roles = "Admin,Warehouse")]
         [HttpGet("next-barcode")]
-        public async Task<ActionResult<string>> GetNextBarcode()
+        public async Task<IActionResult> GetNextBarcode()
         {
-            const long firstBarcode = 8934567890128L;
-            const long lastBarcode = 8939999999999L;
+            const int firstNumber = 10010;
+            const int lastNumber = 99999;
+            const string prefix = "SAKURA";
 
-            List<string> existingBarcodes = await _context.Products
+            var existingBarcodes = await _context.Products
                 .AsNoTracking()
                 .Select(p => p.Barcode)
                 .ToListAsync();
 
-            long maxExisting = firstBarcode - 1;
+            var usedNumbers = new HashSet<int>();
 
             foreach (string barcode in existingBarcodes)
             {
-                if (string.IsNullOrEmpty(barcode) ||
-                    barcode.Length != 13 ||
-                    !barcode.StartsWith("893", StringComparison.Ordinal))
+                if (string.IsNullOrWhiteSpace(barcode))
                 {
                     continue;
                 }
 
-                long numericBarcode;
-                if (long.TryParse(barcode, NumberStyles.None, CultureInfo.InvariantCulture, out numericBarcode)
-                    && numericBarcode > maxExisting)
+                string normalized = barcode.Trim().ToUpperInvariant();
+
+                if (normalized.Length == 11 &&
+                    normalized.StartsWith(
+                        prefix,
+                        StringComparison.Ordinal) &&
+                    int.TryParse(
+                        normalized.Substring(prefix.Length),
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out int number) &&
+                    number <= lastNumber)
                 {
-                    maxExisting = numericBarcode;
+                    usedNumbers.Add(number);
                 }
             }
 
-            long candidate = maxExisting + 1;
-
-            // Kiểm tra lại mã ứng viên trước khi trả về.
-            while (candidate <= lastBarcode &&
-                   await _context.Products.AnyAsync(
-                       p => p.Barcode == candidate.ToString(CultureInfo.InvariantCulture)))
+            for (int number = firstNumber;
+                 number <= lastNumber;
+                 number++)
             {
-                candidate++;
-            }
+                string candidate =
+                    prefix + number.ToString(
+                        "D5",
+                        CultureInfo.InvariantCulture);
 
-            // Trường hợp đã hết dải mã lớn nhất, tìm mã trống từ đầu dải.
-            if (candidate > lastBarcode)
-            {
-                candidate = firstBarcode;
-                while (candidate <= lastBarcode &&
-                       await _context.Products.AnyAsync(
-                           p => p.Barcode == candidate.ToString(CultureInfo.InvariantCulture)))
+                if (!usedNumbers.Contains(number) &&
+                    !await _context.Products.AnyAsync(
+                        p => p.Barcode == candidate))
                 {
-                    candidate++;
+                    return Ok(new { barcode = candidate });
                 }
             }
 
-            if (candidate > lastBarcode)
+            for (int number = 0;
+                 number < firstNumber;
+                 number++)
             {
-                return Conflict(new { message = "Đã hết dải mã vạch khả dụng bắt đầu bằng 893." });
+                string candidate =
+                    prefix + number.ToString(
+                        "D5",
+                        CultureInfo.InvariantCulture);
+
+                if (!usedNumbers.Contains(number) &&
+                    !await _context.Products.AnyAsync(
+                        p => p.Barcode == candidate))
+                {
+                    return Ok(new { barcode = candidate });
+                }
             }
 
-            return Ok(new { barcode = candidate.ToString(CultureInfo.InvariantCulture) });
+            return Conflict(new
+            {
+                message = "Đã hết dải mã barcode SAKURA + 5 chữ số."
+            });
         }
 
-        // POST: api/products
-        [HttpPost]
-        public async Task<ActionResult<Product>> CreateProduct(Product product)
+        private static bool IsValidBarcode(string? barcode)
         {
-            if (string.IsNullOrWhiteSpace(product.Barcode) || string.IsNullOrWhiteSpace(product.ProductName))
+            return !string.IsNullOrWhiteSpace(barcode) &&
+                   Regex.IsMatch(
+                       barcode.Trim(),
+                       @"^SAKURA\d{5}$",
+                       RegexOptions.IgnoreCase);
+        }
+
+        private async Task<IActionResult?> ValidateProductAsync(
+            Product product)
+        {
+            if (string.IsNullOrWhiteSpace(product.Barcode) ||
+                string.IsNullOrWhiteSpace(product.ProductName))
             {
-                return BadRequest(new { message = "Mã vạch và tên sản phẩm không được để trống." });
-            }
-
-            product.Barcode = product.Barcode.Trim();
-
-            bool barcodeExists = await _context.Products
-                .AnyAsync(p => p.Barcode == product.Barcode);
-
-            if (barcodeExists)
-            {
-                return Conflict(new
+                return BadRequest(new
                 {
-                    message = "Mã vạch '" + product.Barcode + "' đã tồn tại. Vui lòng dùng mã khác."
+                    message =
+                        "Mã vạch và tên sản phẩm không được để trống."
                 });
             }
 
-            _context.Products.Add(product);
-            await _context.SaveChangesAsync();
+            product.Barcode =
+                product.Barcode.Trim().ToUpperInvariant();
 
-            return CreatedAtAction(nameof(GetProduct), new { id = product.ProductId }, product);
+            product.ProductName = product.ProductName.Trim();
+
+            if (!IsValidBarcode(product.Barcode))
+            {
+                return BadRequest(new
+                {
+                    message =
+                        "Barcode phải có định dạng SAKURA + 5 chữ số, " +
+                        "ví dụ: SAKURA10010."
+                });
+            }
+
+            if (product.ProductName.Length > 150)
+            {
+                return BadRequest(new
+                {
+                    message =
+                        "Tên sản phẩm không được vượt quá 150 ký tự."
+                });
+            }
+
+            if (product.Price <= 0)
+            {
+                return BadRequest(new
+                {
+                    message = "Đơn giá phải lớn hơn 0."
+                });
+            }
+
+            if (product.StockQuantity < 0)
+            {
+                return BadRequest(new
+                {
+                    message = "Tồn kho không được âm."
+                });
+            }
+
+            if (product.CategoryId <= 0 ||
+                !await _context.Categories.AnyAsync(
+                    c => c.CategoryId == product.CategoryId))
+            {
+                return BadRequest(new
+                {
+                    message =
+                        "Danh mục không tồn tại hoặc không hợp lệ."
+                });
+            }
+
+            return null;
+        }
+
+        // POST: api/products
+        // Chi Admin va Warehouse duoc them san pham.
+        [Authorize(Roles = "Admin,Warehouse")]
+        [HttpPost]
+        public async Task<IActionResult> CreateProduct(
+            [FromBody] Product product)
+        {
+            if (product == null)
+            {
+                return BadRequest(new
+                {
+                    message = "Dữ liệu sản phẩm không hợp lệ."
+                });
+            }
+
+            var validation = await ValidateProductAsync(product);
+
+            if (validation != null)
+            {
+                return validation;
+            }
+
+            if (await _context.Products.AnyAsync(
+                    p => p.Barcode.ToUpper() == product.Barcode))
+            {
+                return Conflict(new
+                {
+                    message =
+                        $"Mã vạch '{product.Barcode}' đã tồn tại. " +
+                        "Vui lòng dùng mã khác."
+                });
+            }
+
+            // Khong nhan khoa chinh tu client khi them moi.
+            product.ProductId = 0;
+            product.Category = null;
+
+            _context.Products.Add(product);
+
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                return Conflict(new
+                {
+                    message =
+                        "Không thể thêm sản phẩm. " +
+                        "Hãy kiểm tra mã vạch đã tồn tại hay chưa."
+                });
+            }
+
+            return CreatedAtAction(
+                nameof(GetProduct),
+                new { id = product.ProductId },
+                product);
         }
 
         // PUT: api/products/5
+        // Admin va Warehouse duoc cap nhat thong tin va ton kho.
+        [Authorize(Roles = "Admin,Warehouse")]
         [HttpPut("{id:int}")]
-        public async Task<IActionResult> UpdateProduct(int id, Product product)
+        public async Task<IActionResult> UpdateProduct(
+            int id,
+            [FromBody] Product product)
         {
+            if (product == null)
+            {
+                return BadRequest(new
+                {
+                    message = "Dữ liệu sản phẩm không hợp lệ."
+                });
+            }
+
             if (id != product.ProductId)
             {
-                return BadRequest(new { message = "Mã sản phẩm không trùng khớp." });
+                return BadRequest(new
+                {
+                    message = "Mã sản phẩm không trùng khớp."
+                });
             }
 
-            if (string.IsNullOrWhiteSpace(product.Barcode) || string.IsNullOrWhiteSpace(product.ProductName))
-            {
-                return BadRequest(new { message = "Mã vạch và tên sản phẩm không được để trống." });
-            }
-
-            product.Barcode = product.Barcode.Trim();
-
-            Product? existing = await _context.Products
+            var existing = await _context.Products
                 .FirstOrDefaultAsync(p => p.ProductId == id);
 
             if (existing == null)
             {
-                return NotFound(new { message = "Không tìm thấy sản phẩm cần cập nhật." });
-            }
-
-            bool barcodeUsedByAnotherProduct = await _context.Products
-                .AnyAsync(p => p.ProductId != id && p.Barcode == product.Barcode);
-
-            if (barcodeUsedByAnotherProduct)
-            {
-                return Conflict(new
+                return NotFound(new
                 {
-                    message = "Mã vạch '" + product.Barcode + "' đã được sử dụng bởi sản phẩm khác."
+                    message = "Không tìm thấy sản phẩm cần cập nhật."
                 });
             }
 
-            // Cập nhật trên entity đang được EF Core theo dõi.
+            var validation = await ValidateProductAsync(product);
+
+            if (validation != null)
+            {
+                return validation;
+            }
+
+            if (await _context.Products.AnyAsync(
+                    p => p.ProductId != id &&
+                         p.Barcode.ToUpper() == product.Barcode))
+            {
+                return Conflict(new
+                {
+                    message =
+                        $"Mã vạch '{product.Barcode}' đã được sử dụng " +
+                        "bởi sản phẩm khác."
+                });
+            }
+
             existing.Barcode = product.Barcode;
-            existing.ProductName = product.ProductName.Trim();
+            existing.ProductName = product.ProductName;
             existing.Price = product.Price;
             existing.StockQuantity = product.StockQuantity;
             existing.CategoryId = product.CategoryId;
@@ -275,31 +452,52 @@ namespace MiniSupermarket.API.Controllers
             {
                 await _context.SaveChangesAsync();
             }
-            catch (DbUpdateConcurrencyException)
+            catch (DbUpdateException)
             {
-                if (!await _context.Products.AnyAsync(p => p.ProductId == id))
+                return Conflict(new
                 {
-                    return NotFound();
-                }
-
-                throw;
+                    message =
+                        "Không thể cập nhật sản phẩm. " +
+                        "Hãy kiểm tra mã vạch và dữ liệu liên quan."
+                });
             }
 
+            // 204 tuong thich voi WinForms dang kiem tra IsSuccessStatusCode.
             return NoContent();
         }
 
         // DELETE: api/products/5
+        // Chi Admin va Warehouse duoc xoa san pham.
+        [Authorize(Roles = "Admin,Warehouse")]
         [HttpDelete("{id:int}")]
         public async Task<IActionResult> DeleteProduct(int id)
         {
             var product = await _context.Products.FindAsync(id);
+
             if (product == null)
             {
-                return NotFound();
+                return NotFound(new
+                {
+                    message = "Không tìm thấy sản phẩm."
+                });
             }
 
             _context.Products.Remove(product);
-            await _context.SaveChangesAsync();
+
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                return Conflict(new
+                {
+                    message =
+                        "Không thể xóa sản phẩm vì sản phẩm " +
+                        "có thể đã được sử dụng trong đơn hàng."
+                });
+            }
+
             return NoContent();
         }
     }
