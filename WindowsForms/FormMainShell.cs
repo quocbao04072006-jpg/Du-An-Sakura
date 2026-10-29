@@ -438,9 +438,9 @@ namespace MiniSupermarket.WinForms
 
             Panel customerPanel =
                 CreateInfoCard(
-                    "KHÁCH HÀNG",
+                    "KHÁCH HÀNG MỚI",
                     "Đang tải...",
-                    "Tổng số khách hàng",
+                    "Đăng ký hôm nay",
                     Color.FromArgb(124, 58, 237),
                     out lblCustomersValue);
 
@@ -528,7 +528,7 @@ namespace MiniSupermarket.WinForms
             Panel rowCustomers =
                 CreateAttentionRow(
                     "●",
-                    "Khách hàng đang quản lý",
+                    "Khách hàng mới hôm nay",
                     Color.FromArgb(124, 58, 237),
                     out lblAttentionCustomers);
 
@@ -1135,7 +1135,8 @@ namespace MiniSupermarket.WinForms
 
                 int orders = 0;
                 int lowStock = 0;
-                decimal revenue = 0;
+                int newCustomersToday = 0;
+                decimal revenue = 0m;
 
                 using (
                     JsonDocument document =
@@ -1155,10 +1156,11 @@ namespace MiniSupermarket.WinForms
                             root,
                             "totalOrders");
 
-                    lowStock =
-                        ReadInt(
-                            root,
-                            "lowStockProducts");
+                    // Số mặt hàng có tồn kho <= 10, gồm cả hết hàng.
+                    lowStock = ReadInt(root, "itemsLowStock");
+
+                    // Số khách hàng mới đăng ký hôm nay.
+                    newCustomersToday = ReadInt(root, "newCustomersToday");
                 }
 
                 // =================================================
@@ -1210,10 +1212,10 @@ namespace MiniSupermarket.WinForms
                 // =================================================
 
                 lblCustomersValue.Text =
-                    totalCustomers.ToString("N0");
+                    newCustomersToday.ToString("N0");
 
                 lblAttentionCustomers.Text =
-                    totalCustomers.ToString("N0");
+                    newCustomersToday.ToString("N0");
 
                 // =================================================
                 // 7. TRẠNG THÁI
@@ -1605,10 +1607,9 @@ namespace MiniSupermarket.WinForms
                     break;
 
                 case "CASHIER":
-
                     btnPOS.Visible = true;
-                    btnCustomer.Visible = true;
-
+                    // Theo rubric, thu ngân chỉ thấy nút POS.
+                    btnCustomer.Visible = false;
                     break;
 
                 case "WAREHOUSE":
